@@ -207,7 +207,8 @@ end
     @test occursin("strictly positive", String(take!(out2)))
 
     # Lookback end-to-end (no strike prompt): S0=4,u=2,d=0.5,n=3,r=0.25.
-    input3 = IOBuffer("lookback\nput\n100\n4\n2\n0.5\n3\n0.25\n")
+    # `exact` answers the pricing-method prompt for path-dependent kinds.
+    input3 = IOBuffer("lookback\nput\n100\n4\n2\n0.5\n3\n0.25\nexact\n")
     out3 = IOBuffer()
     res3 = Interface.run(input3, out3; plot = :none)
     @test res3.option.V0 ≈ 1.376 atol = 1e-10
@@ -226,4 +227,83 @@ end
         @test save_price_tree_png(build_price_lattice(100, 1.2, 0.8, 2)) === nothing
         @test save_paths_png(enumerate_paths(ModelParams(100, 1.2, 0.8, 2))) === nothing
     end
+end
+
+@testset "MonteCarlo" begin
+    using BinomialAssetPricing.MonteCarlo
+    using BinomialAssetPricing.Options
+    using BinomialAssetPricing.Interface
+    using Random
+
+    # Simulated paths are honest binomial random walks: start at S0, every
+    # step multiplies by u or d.
+    paths = simulate_paths(MersenneTwister(7), ModelParams(100.0, 1.2, 0.8, 4), 50)
+    @test length(paths) == 50
+    for pr in paths
+        @test length(pr) == 5
+        @test pr[1] == 100.0
+        @test all(pr[k + 1] == pr[k] * 1.2 || pr[k + 1] == pr[k] * 0.8 for k in 1:4)
+    end
+
+    # Same seed → identical estimate.
+    p = ModelParams(4.0, 2.0, 0.5, 3, 0.25)
+    spec_lb = OptionSpec(:lookback, :put)
+    a = value_option_mc(p, spec_lb, 1_000, 100.0; rng = MersenneTwister(42))
+    b = value_option_mc(p, spec_lb, 1_000, 100.0; rng = MersenneTwister(42))
+    @test a.V0 == b.V0
+
+    # MC lookback vs the exact path-tree price (lecture example, V0 = 1.376).
+    mc = value_option_mc(p, spec_lb, 50_000, 1000.0; rng = MersenneTwister(123))
+    @test abs(mc.V0 - 1.376) ≤ max(4 * mc.std_error, 0.02)
+
+    # MC asian vs the exact path-tree price.
+    p2 = ModelParams(100.0, 1.2, 0.8, 4, 0.05)
+    spec_as = OptionSpec(:asian, :call, 100.0)
+    exact = value_option(p2, spec_as, 100.0).V0
+    mc_as = value_option_mc(p2, spec_as, 50_000, 100.0; rng = MersenneTwister(321))
+    @test abs(mc_as.V0 - exact) ≤ max(4 * mc_as.std_error, 0.05)
+
+    # MC european converges to the lattice price.
+    spec_eu = OptionSpec(:european, :call, 105.0)
+    eu_exact = value_option(p2, spec_eu, 100.0).V0
+    mc_eu = value_option_mc(p2, spec_eu, 50_000, 100.0; rng = MersenneTwister(99))
+    @test abs(mc_eu.V0 - eu_exact) ≤ max(4 * mc_eu.std_error, 0.05)
+
+    # Analytic asian anchor: K ≈ 0 makes the max never bind, so the exact
+    # price is the discounted expected average (which includes S0).
+    tiny = value_option(p2, OptionSpec(:asian, :call, 0.0001), 100.0)
+    avg_expectation = 100 / 5 * sum(1.05^k for k in 0:4)
+    @test tiny.V0 ≈ (avg_expectation - 0.0001) / 1.05^4 atol = 1e-10
+
+    # Validation: american rejected, m ≥ 2, asian needs a strike.
+    @test_throws ArgumentError value_option_mc(p2, OptionSpec(:american, :put, 105.0),
+                                               100, 100.0)
+    @test_throws ArgumentError value_option_mc(p2, spec_as, 1, 100.0)
+    @test_throws ArgumentError value_option_mc(p2, OptionSpec(:asian, :call), 100, 100.0)
+    @test_throws ArgumentError value_option(p2, OptionSpec(:asian, :call), 100.0)
+
+    io = IOBuffer()
+    summarize_mc(io, mc)
+    s = String(take!(io))
+    @test occursin("Monte Carlo", s)
+    @test occursin("95% confidence", s)
+
+    # Interface: asian priced exactly when chosen.
+    in1 = IOBuffer("asian\ncall\n105\n1000\n100\n1.2\n0.8\n3\n\nexact\n")
+    res1 = Interface.run(in1, IOBuffer(); plot = :none)
+    @test res1.option.V0 ≈ value_option(ModelParams(100.0, 1.2, 0.8, 3),
+                                        OptionSpec(:asian, :call, 105.0), 1000.0).V0
+    @test res1.mc === nothing
+
+    # Interface: asian via simulation.
+    in2 = IOBuffer("asian\nput\n95\n500\n100\n1.2\n0.8\n3\n0.05\nsimulation\n5000\n")
+    res2 = Interface.run(in2, IOBuffer(); plot = :none)
+    @test res2.mc !== nothing
+    @test res2.option === nothing
+
+    # Interface: n over the path cap forces Monte Carlo (was a dead end).
+    in3 = IOBuffer("lookback\nput\n100\n4\n2\n0.5\n25\n0.25\n1000\n")
+    res3 = Interface.run(in3, IOBuffer(); plot = :none)
+    @test res3.mc.V0 > 0
+    @test res3.option === nothing
 end

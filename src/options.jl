@@ -3,7 +3,7 @@
 
 Derivative pricing, delta hedging and replication on the binomial tree.
 
-Three contract kinds, all priced under the risk-neutral measure
+Four contract kinds, all priced under the risk-neutral measure
 `p̃ = (1+r−d)/(u−d)`, `q̃ = 1−p̃`:
 
 - `:european` — backward induction of `payoff(S_n)` on the recombining
@@ -13,6 +13,9 @@ Three contract kinds, all priced under the risk-neutral measure
 - `:lookback` — floating-strike path-dependent claim on the full `2^n`
   path tree (call: `S_n − min S`, put: `max S − S_n`), exactly the
   lookback example in the lecture notes.
+- `:asian` — fixed-strike arithmetic-average claim on the same path
+  tree (call: `max(avg − K, 0)`, put: `max(K − avg, 0)`), where `avg`
+  is the mean of all `n+1` path prices including `S0`.
 
 For every contract the module also computes the delta hedge
 
@@ -32,7 +35,8 @@ using ..Lattice: build_price_lattice, price, price_american
 using ..RiskNeutral: european_call_payoff, european_put_payoff
 using ..Paths: PathSet, enumerate_paths, MAX_ENUM_PATHS
 
-export OptionSpec, OptionValuation, value_option, summarize_option, path_payoff
+export OptionSpec, OptionValuation, value_option, summarize_option, path_payoff,
+       contract_label
 
 """
     OptionSpec
@@ -40,11 +44,13 @@ export OptionSpec, OptionValuation, value_option, summarize_option, path_payoff
 Which derivative to price.
 
 # Fields
-- `kind::Symbol`: `:european`, `:american` or `:lookback`.
+- `kind::Symbol`: `:european`, `:american`, `:lookback` or `:asian`.
 - `callput::Symbol`: `:call` or `:put`. For `:lookback` these are the
   floating-strike versions — call pays `S_n − min_k S_k`, put pays
-  `max_k S_k − S_n`.
-- `K::Float64`: strike; ignored (`NaN`) for `:lookback`.
+  `max_k S_k − S_n`. For `:asian` they are the fixed-strike
+  arithmetic-average versions — call pays `max(avg − K, 0)`, put pays
+  `max(K − avg, 0)` with `avg` the mean of the whole path.
+- `K::Float64`: strike; ignored (`NaN`) only for `:lookback`.
 
 `OptionSpec(kind, callput)` builds a strikeless spec (lookback).
 """
@@ -112,18 +118,22 @@ end
     path_payoff(spec::OptionSpec, prices::Vector{Float64}) -> Float64
 
 Terminal payoff of the contract along one price path `prices`
-(`prices[1] == S0`, `prices[end] == S_n`). For `:lookback` the whole path
-matters; vanilla contracts only read `prices[end]`.
+(`prices[1] == S0`, `prices[end] == S_n`). For `:lookback` and `:asian`
+the whole path matters; vanilla contracts only read `prices[end]`.
 """
 function path_payoff(spec::OptionSpec, prices::Vector{Float64})
-    spec.kind in (:european, :american, :lookback) || throw(ArgumentError(
-        "Derivative kind must be :european, :american or :lookback (got $(spec.kind))."))
+    spec.kind in (:european, :american, :lookback, :asian) || throw(ArgumentError(
+        "Derivative kind must be :european, :american, :lookback or :asian (got $(spec.kind))."))
     spec.callput in (:call, :put) || throw(ArgumentError(
         "Option must be :call or :put (got $(spec.callput))."))
     if spec.kind == :lookback
         return spec.callput == :put ?
                maximum(prices) - prices[end] :
                prices[end] - minimum(prices)
+    end
+    if spec.kind == :asian
+        avg = sum(prices) / length(prices)
+        return spec.callput == :call ? max(avg - spec.K, 0.0) : max(spec.K - avg, 0.0)
     end
     return _exercise_value(spec, prices[end])
 end
@@ -140,15 +150,15 @@ Price the contract, compute the per-node delta hedge, and roll the
 replicating portfolio forward along every path to verify
 `X_k(ω) = V_k(ω)` (up to the exercise time for `:american`).
 
-Lookbacks are priced on the full `2^n` path tree and therefore require
-`n ≤ MAX_ENUM_PATHS`; european/american contracts price on the lattice
-for any `n`, but the pathwise replication check is skipped when
+Lookbacks and asians are priced on the full `2^n` path tree and therefore
+require `n ≤ MAX_ENUM_PATHS`; european/american contracts price on the
+lattice for any `n`, but the pathwise replication check is skipped when
 `n > MAX_ENUM_PATHS`.
 """
 function value_option(p::ModelParams, spec::OptionSpec, capital::Real)
     validate(p)
-    spec.kind in (:european, :american, :lookback) || throw(ArgumentError(
-        "Derivative kind must be :european, :american or :lookback (got $(spec.kind))."))
+    spec.kind in (:european, :american, :lookback, :asian) || throw(ArgumentError(
+        "Derivative kind must be :european, :american, :lookback or :asian (got $(spec.kind))."))
     spec.callput in (:call, :put) || throw(ArgumentError(
         "Option must be :call or :put (got $(spec.callput))."))
     (isfinite(capital) && capital > 0) || throw(ArgumentError(
@@ -156,23 +166,25 @@ function value_option(p::ModelParams, spec::OptionSpec, capital::Real)
 
     lattice = build_price_lattice(p.S0, p.u, p.d, p.n)
     q = risk_neutral_prob(p)
-    pathtree = spec.kind == :lookback
+    pathtree = spec.kind in (:lookback, :asian)
+    if spec.kind != :lookback
+        (isfinite(spec.K) && spec.K > 0) || throw(ArgumentError(
+            "European/American/Asian options need a strictly positive strike K " *
+            "(got $(spec.K))."))
+    end
     exercise_nodes = nothing
 
     if pathtree
         p.n ≤ MAX_ENUM_PATHS || throw(ArgumentError(
-            "Lookback options need the full 2^n path tree — cap is n ≤ " *
-            "$MAX_ENUM_PATHS (got $(p.n))."))
+            "Path-dependent options (lookback/asian) need the full 2^n path " *
+            "tree — cap is n ≤ $MAX_ENUM_PATHS (got $(p.n))."))
         ps = enumerate_paths(p; lattice = lattice)
         term = [path_payoff(spec, pr) for pr in ps.prices]
-        values = _lookback_value_tree(term, p.n, p.r, q)
+        values = _pathtree_value_tree(term, p.n, p.r, q)
         deltas = _delta_pathtree(values, lattice, p.n)
         expected = sum(ps.probs .* term)
         premium = NaN
     else
-        (isfinite(spec.K) && spec.K > 0) || throw(ArgumentError(
-            "European/American options need a strictly positive strike K " *
-            "(got $(spec.K))."))
         payoff = spec.callput == :call ?
                  european_call_payoff(spec.K) : european_put_payoff(spec.K)
         values = spec.kind == :american ?
@@ -240,7 +252,7 @@ end
 # Full non-recombining value tree for a path-dependent claim.
 # `term[j+1]` is the payoff of path `j` (bit i of j = toss i+1, 0 = up).
 # History h at level k has children h (up) and h + 2^k (down).
-function _lookback_value_tree(term::Vector{Float64}, n::Int, r::Real, q::Real)
+function _pathtree_value_tree(term::Vector{Float64}, n::Int, r::Real, q::Real)
     disc = 1 / (1 + r)
     values = Vector{Vector{Float64}}(undef, n + 1)
     values[n + 1] = term
@@ -322,7 +334,7 @@ function _replicate_wealth(values, deltas,
                            ps::PathSet, r::Real, spec::OptionSpec;
                            store::Bool)
     n = length(ps.moves[1])
-    pathtree = spec.kind == :lookback
+    pathtree = spec.kind in (:lookback, :asian)
     wealth = store ? Vector{Vector{Float64}}(undef, 2^n) : nothing
     max_err = 0.0
     for j in 0:(2^n - 1)
@@ -368,14 +380,9 @@ showing the replication matching `V_k` step by step.
 function summarize_option(io::IO, ov::OptionValuation)
     spec = ov.spec
     n = length(ov.lattice) - 1
-    pathtree = spec.kind == :lookback
+    pathtree = spec.kind in (:lookback, :asian)
 
-    if pathtree
-        pf = spec.callput == :put ? "max S − S_T" : "S_T − min S"
-        label = "lookback $(spec.callput) (floating strike, payoff = $pf)"
-    else
-        label = "$(spec.kind) $(spec.callput), K=$(spec.K)"
-    end
+    label = contract_label(spec)
 
     println(io, "─"^58)
     println(io, " Option: $label")
@@ -487,5 +494,22 @@ function _path_exercised(ov::OptionValuation, j::Int)
 end
 
 summarize_option(ov::OptionValuation) = summarize_option(stdout, ov)
+
+"""
+    contract_label(spec::OptionSpec) -> String
+
+One-line human description of the contract, shared by the exact and
+Monte Carlo report blocks.
+"""
+function contract_label(spec::OptionSpec)
+    if spec.kind == :lookback
+        pf = spec.callput == :put ? "max S − S_T" : "S_T − min S"
+        return "lookback $(spec.callput) (floating strike, payoff = $pf)"
+    elseif spec.kind == :asian
+        pf = spec.callput == :call ? "(avg S − K)⁺" : "(K − avg S)⁺"
+        return "asian $(spec.callput), K=$(spec.K) (payoff = $pf, avg over S0…Sn)"
+    end
+    return "$(spec.kind) $(spec.callput), K=$(spec.K)"
+end
 
 end # module Options

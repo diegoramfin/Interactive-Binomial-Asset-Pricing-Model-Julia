@@ -94,14 +94,16 @@ _xs(row::Vector{Float64}) =
     length(row) == 1 ? [0.0] : collect(range(0.0, 1.0; length = length(row)))
 
 """
-    plot_paths(io::IO, ps::PathSet; title = "Price paths", max_paths = 40)
+    plot_paths(io::IO, paths; title = "Price paths", max_paths = 40)
 
-Draw every enumerated price path (capped at `max_paths` for legibility)
-through the final period. Requires `UnicodePlots`; falls back to ASCII art.
+Draw every price path in `paths` (capped at `max_paths` for legibility)
+through the final period. Accepts any vector of price vectors — enumerated
+`PathSet` paths or Monte Carlo simulations alike. Requires `UnicodePlots`;
+falls back to ASCII art.
 """
-function plot_paths(io::IO, ps::PathSet; title::AbstractString = "Price paths",
+function plot_paths(io::IO, paths::AbstractVector{<:AbstractVector{<:Real}};
+                    title::AbstractString = "Price paths",
                     max_paths::Int = 40)
-    paths = ps.prices
     isempty(paths) && return nothing
     shown = length(paths) ≤ max_paths ? paths : paths[1:max_paths]
     if !_unicode
@@ -127,6 +129,8 @@ function plot_paths(io::IO, ps::PathSet; title::AbstractString = "Price paths",
     return nothing
 end
 
+plot_paths(io::IO, ps::PathSet; kw...) = plot_paths(io, ps.prices; kw...)
+
 # --------------------------------------------------------------------------
 # PNG output
 # --------------------------------------------------------------------------
@@ -151,16 +155,18 @@ function save_price_tree_png(lattice::Vector{Vector{Float64}};
 end
 
 """
-    save_paths_png(ps::PathSet; filename = "price_paths.png", title = "Price paths", max_paths = 200) -> Union{String, Nothing}
+    save_paths_png(paths; filename = "price_paths.png", title = "Price paths", max_paths = 200) -> Union{String, Nothing}
 
-Write every enumerated price path (capped at `max_paths`) to
-`output/<filename>`. Returns the file path, or `nothing` when `Plots.jl`/GR
+Write every price path in `paths` (capped at `max_paths`) to
+`output/<filename>` — enumerated `PathSet` paths or Monte Carlo
+simulations alike. Returns the file path, or `nothing` when `Plots.jl`/GR
 is unavailable.
 """
-function save_paths_png(ps::PathSet; filename::AbstractString = "price_paths.png",
+function save_paths_png(paths::AbstractVector{<:AbstractVector{<:Real}};
+                        filename::AbstractString = "price_paths.png",
                         title::AbstractString = "Price paths", max_paths::Int = 200)
     _plots || return nothing
-    paths = length(ps.prices) ≤ max_paths ? ps.prices : ps.prices[1:max_paths]
+    paths = length(paths) ≤ max_paths ? paths : paths[1:max_paths]
     n = length(paths[1]) - 1
     colors = _palette(length(paths))
     plt = Plots.plot(; title = title, xlabel = "period", ylabel = "price",
@@ -170,6 +176,8 @@ function save_paths_png(ps::PathSet; filename::AbstractString = "price_paths.png
     end
     return _write_png(plt, filename)
 end
+
+save_paths_png(ps::PathSet; kw...) = save_paths_png(ps.prices; kw...)
 
 function _write_png(plt, filename::AbstractString)
     mkpath(PNG_DIR)

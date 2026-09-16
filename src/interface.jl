@@ -14,6 +14,7 @@ using ..Params: ModelParams, parse_float, parse_optional_float, parse_int,
                 parse_choice
 using ..Pricing: value_stock_tree, summarize
 using ..Options: OptionSpec, value_option, summarize_option
+using ..MonteCarlo: value_option_mc, summarize_mc, simulate_paths
 using ..Paths: enumerate_paths, MAX_ENUM_PATHS
 using ..Plotting: plot_price_tree, plot_paths, save_price_tree_png, save_paths_png
 
@@ -23,12 +24,12 @@ export ask_params, ask_contract, run
     ask_contract([io_in = stdin, io_out = stdout]) -> (OptionSpec, Float64)
 
 Prompt for the contract first — derivative type
-(`european`/`american`/`lookback`) then `call`/`put` — then the strike `K`
-(skipped for lookbacks, which are floating-strike), and finally the capital
-to deploy into the replicating hedge.
+(`european`/`american`/`lookback`/`asian`) then `call`/`put` — then the
+strike `K` (skipped for lookbacks, which are floating-strike), and finally
+the capital to deploy into the replicating hedge.
 """
 function ask_contract(io_in::IO = stdin, io_out::IO = stdout)
-    kinds = ("european", "american", "lookback")
+    kinds = ("european", "american", "lookback", "asian")
     kind = _ask_one(io_in, io_out, "Derivative type ($(join(kinds, "/"))): ",
                     s -> parse_choice(s, "Derivative type", kinds), _ -> true)
     callput = _ask_one(io_in, io_out, "Call or put (call/put): ",
@@ -117,12 +118,15 @@ end
 
 Full interactive session: ask for the contract and capital, then the model
 parameters; print the stock valuation summary followed by the option block
-(fair value, delta hedge per node, per-path replicating wealth); enumerate
-every path-dependent price path, draw the price tree and all paths up to the
-final period in the terminal, and attempt PNG output.
+(exact lattice/path-tree valuation with the delta hedge and replication
+check, or a Monte Carlo estimate for path-dependent contracts when the
+user picks `simulation` or `n` exceeds the enumeration cap); enumerate
+every path-dependent price path — or draw a sample of simulated paths —
+and attempt PNG output.
 
-Returns `(stock = StockValuation, option = OptionValuation-or-nothing)`.
-`plot` selects terminal-only (`:terminal`), PNG-only (`:png`) or both.
+Returns `(stock = StockValuation, option = OptionValuation-or-nothing,
+mc = MCValuation-or-nothing)`. `plot` selects terminal-only (`:terminal`),
+PNG-only (`:png`) or both.
 """
 function run(io_in::IO = stdin, io_out::IO = stdout; plot::Symbol = :both)
     spec, capital = ask_contract(io_in, io_out)
@@ -135,26 +139,65 @@ function run(io_in::IO = stdin, io_out::IO = stdout; plot::Symbol = :both)
     println(io_out)
 
     local ov = nothing
-    if spec.kind == :lookback && p.n > MAX_ENUM_PATHS
-        println(io_out, "Lookback needs the full 2^$(p.n) path tree — " *
-                        "cap is n ≤ $MAX_ENUM_PATHS; skipping option valuation.")
+    local mcv = nothing
+    if spec.kind in (:lookback, :asian)
+        local m::Int
+        use_mc = false
+        if p.n > MAX_ENUM_PATHS
+            println(io_out, "$(spec.kind) needs the full 2^$(p.n) path tree — " *
+                            "cap is n ≤ $MAX_ENUM_PATHS; switching to Monte Carlo simulation.")
+            use_mc = true
+        else
+            method = _ask_one(io_in, io_out, "Pricing method (exact/simulation): ",
+                              s -> parse_choice(s, "Pricing method", ("exact", "simulation")),
+                              _ -> true)
+            use_mc = method == :simulation
+        end
+        if use_mc
+            m = _ask_one(io_in, io_out, "Monte Carlo paths (m): ",
+                         s -> parse_int(s, "m"),
+                         v -> v ≥ 100 || "m must be at least 100 for a meaningful estimate")
+            mcv = value_option_mc(p, spec, m, capital)
+            summarize_mc(io_out, mcv)
+        else
+            ov = value_option(p, spec, capital)
+            summarize_option(io_out, ov)
+        end
     else
         ov = value_option(p, spec, capital)
         summarize_option(io_out, ov)
     end
     println(io_out)
 
-    result = (stock = val, option = ov)
+    result = (stock = val, option = ov, mc = mcv)
     n = p.n
-    if n > MAX_ENUM_PATHS
-        println(io_out, "n = $n gives 2^$n paths — skipping explicit per-path " *
-                        "enumeration (cap n ≤ $MAX_ENUM_PATHS).")
+    ps = ov !== nothing && ov.paths !== nothing ? ov.paths :
+         (n ≤ MAX_ENUM_PATHS ? enumerate_paths(p; lattice = val.lattice) : nothing)
+
+    if ps === nothing
+        if mcv !== nothing && plot != :none
+            sample = simulate_paths(p, min(mcv.m, 40))
+            if plot in (:terminal, :both)
+                println(io_out, "Simulated price paths, steps 0–$n:")
+                plot_paths(io_out, sample;
+                           title = "Simulated price paths (sample of $(length(sample)))")
+                println(io_out)
+            end
+            if plot in (:png, :both)
+                f = save_paths_png(sample; filename = "mc_paths.png",
+                                   title = "Simulated price paths")
+                if f === nothing
+                    println(io_out, "PNG output skipped (Plots.jl/GR unavailable or backend failed).")
+                else
+                    println(io_out, "PNG written: $f")
+                end
+            end
+        else
+            println(io_out, "n = $n gives 2^$n paths — skipping explicit per-path " *
+                            "enumeration (cap n ≤ $MAX_ENUM_PATHS).")
+        end
         return result
     end
-
-    # value_option already enumerated the same paths — reuse them for the plots.
-    ps = ov !== nothing && ov.paths !== nothing ?
-         ov.paths : enumerate_paths(p; lattice = val.lattice)
 
     println(io_out, "Enumerated $(length(ps.prices)) path-dependent price paths.")
     println(io_out)
