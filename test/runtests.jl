@@ -216,15 +216,31 @@ end
 
     # Terminal plotting works headlessly (fallback or UnicodePlots), PNG skipped.
     io = IOBuffer()
-    plot_price_tree(io, build_price_lattice(100, 1.2, 0.8, 3))
-    @test !isempty(String(take!(io)))
+    lat = build_price_lattice(100, 1.2, 0.8, 3)
+    plot_price_tree(io, lat)
+    s = String(take!(io))
+    @test occursin("Underlying Prices", s)
+    @test occursin("100.00", s)         # root price labeled
+    @test occursin("172.80", s)         # top-most terminal price labeled
+    @test occursin('/', s) && occursin('\\', s)   # tree edges present
+
+    # Option value tree (recombining) renders with node labels.
+    p_eu = ModelParams(100.0, 1.2, 0.8, 3)
+    ov_eu = value_option(p_eu, OptionSpec(:european, :call, 105.0), 100.0)
+    io_v = IOBuffer()
+    plot_value_tree(io_v, ov_eu.values)
+    sv = String(take!(io_v))
+    @test occursin("Option Prices", sv)
+    @test occursin("0.00", sv)          # zero-valued nodes appear
+
     io2 = IOBuffer()
     plot_paths(io2, enumerate_paths(ModelParams(100, 1.2, 0.8, 3)))
     @test !isempty(String(take!(io2)))
 
     # PNG functions degrade to `nothing` when Plots.jl is not loadable.
     if !Plotting._plots
-        @test save_price_tree_png(build_price_lattice(100, 1.2, 0.8, 2)) === nothing
+        @test save_price_tree_png(lat) === nothing
+        @test save_value_tree_png(ov_eu.values) === nothing
         @test save_paths_png(enumerate_paths(ModelParams(100, 1.2, 0.8, 2))) === nothing
     end
 end

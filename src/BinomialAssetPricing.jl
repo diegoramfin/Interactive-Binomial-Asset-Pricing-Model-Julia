@@ -39,7 +39,8 @@ using .Paths: PathSet, enumerate_paths
 using .Options: OptionSpec, OptionValuation, value_option, summarize_option,
                 path_payoff, contract_label
 using .MonteCarlo: MCValuation, simulate_paths, value_option_mc, summarize_mc
-using .Plotting: plot_price_tree, plot_paths, save_price_tree_png, save_paths_png
+using .Plotting: plot_price_tree, plot_value_tree, plot_paths,
+                   save_price_tree_png, save_value_tree_png, save_paths_png
 using .Interface: ask_params, ask_contract, run
 
 # Rexport the core surface so `using BinomialAssetPricing` is enough.
@@ -47,9 +48,9 @@ export ModelParams, validate, risk_neutral_prob, risk_neutral_down_prob,
        parse_float, parse_int, parse_choice,
        build_price_lattice, StockValuation, value_stock_tree, summarize,
        PathSet, enumerate_paths,
-       OptionSpec, OptionValuation, value_option, summarize_option, path_payoff,
        contract_label, MCValuation, simulate_paths, value_option_mc, summarize_mc,
-       plot_price_tree, plot_paths, save_price_tree_png, save_paths_png,
+       plot_price_tree, plot_value_tree, plot_paths,
+       save_price_tree_png, save_value_tree_png, save_paths_png,
        ask_params, ask_contract, run
 
 end # module

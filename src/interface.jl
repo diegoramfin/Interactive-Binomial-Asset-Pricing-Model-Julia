@@ -15,8 +15,9 @@ using ..Params: ModelParams, parse_float, parse_optional_float, parse_int,
 using ..Pricing: value_stock_tree, summarize
 using ..Options: OptionSpec, value_option, summarize_option
 using ..MonteCarlo: value_option_mc, summarize_mc, simulate_paths
+using ..Plotting: plot_price_tree, plot_value_tree, plot_paths,
+                  save_price_tree_png, save_value_tree_png, save_paths_png
 using ..Paths: enumerate_paths, MAX_ENUM_PATHS
-using ..Plotting: plot_price_tree, plot_paths, save_price_tree_png, save_paths_png
 
 export ask_params, ask_contract, run
 
@@ -204,8 +205,15 @@ function run(io_in::IO = stdin, io_out::IO = stdout; plot::Symbol = :both)
 
     if plot in (:terminal, :both)
         println(io_out, "Price tree (recombining, steps 0–$n):")
-        plot_price_tree(io_out, val.lattice; title = "Price tree — recombining lattice")
+        plot_price_tree(io_out, val.lattice; title = "Underlying Prices")
         println(io_out)
+
+        # Option value tree only recombines for european/american.
+        if ov !== nothing && spec.kind in (:european, :american)
+            println(io_out, "Option value tree (steps 0–$n):")
+            plot_value_tree(io_out, ov.values; title = "Option Prices")
+            println(io_out)
+        end
 
         println(io_out, "Every path-dependent price path, steps 0–$n:")
         plot_paths(io_out, ps; title = "All price paths — steps 0–$n")
@@ -214,8 +222,13 @@ function run(io_in::IO = stdin, io_out::IO = stdout; plot::Symbol = :both)
 
     if plot in (:png, :both)
         f1 = save_price_tree_png(val.lattice; title = "Binomial price tree (S0=$(p.S0), u=$(p.u), d=$(p.d), n=$(p.n))")
-        f2 = save_paths_png(ps; title = "All $(length(ps.prices)) price paths")
-        for f in (f1, f2)
+        pngs = [f1]
+        if ov !== nothing && spec.kind in (:european, :american)
+            push!(pngs, save_value_tree_png(ov.values;
+                                            title = "Option value tree ($(spec.kind) $(spec.callput), K=$(spec.K))"))
+        end
+        push!(pngs, save_paths_png(ps; title = "All $(length(ps.prices)) price paths"))
+        for f in pngs
             if f === nothing
                 println(io_out, "PNG output skipped (Plots.jl/GR unavailable or backend failed).")
             else
